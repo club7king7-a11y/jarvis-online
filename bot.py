@@ -6,271 +6,245 @@ from datetime import datetime
 import random
 import sqlite3
 import hashlib
+import requests
 
-# === 1. 页面配置 ===
-st.set_page_config(page_title="Jarvis Online", page_icon="🌐", layout="wide")
+# === 1. 系统核心配置 & HUD 界面风格 ===
+st.set_page_config(page_title="Jarvis OS", page_icon="☢️", layout="wide")
 
-# === 2. 数据库核心 (SQLite) ===
-DB_FILE = "jarvis_data.db"
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=Share+Tech+Mono&display=swap');
+    
+    :root { 
+        --neon-cyan: #00f3ff; 
+        --neon-gold: #ffd700;
+        --neon-danger: #ff073a;
+        --glass: rgba(10, 10, 20, 0.85);
+        --border: 1px solid rgba(0, 243, 255, 0.2);
+    }
+    
+    .stApp { 
+        background-color: #050505; 
+        background-image: 
+            linear-gradient(rgba(0, 243, 255, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(0, 243, 255, 0.03) 1px, transparent 1px);
+        background-size: 30px 30px;
+        font-family: 'Rajdhani', sans-serif;
+    }
+    
+    /* 侧边导航 */
+    section[data-testid="stSidebar"] { 
+        background-color: #0a0a0f; 
+        border-right: var(--border);
+        box-shadow: 10px 0 30px rgba(0,0,0,0.5);
+    }
+    
+    /* 标题特效 */
+    h1, h2, h3 { 
+        font-family: 'Share Tech Mono', monospace; 
+        text-transform: uppercase;
+        letter-spacing: 2px;
+    }
+    .main-title {
+        background: -webkit-linear-gradient(0deg, var(--neon-cyan), #bd00ff);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 3em;
+        font-weight: bold;
+        text-shadow: 0 0 20px rgba(0, 243, 255, 0.3);
+    }
+
+    /* 排行榜卡片 */
+    .rank-card {
+        background: linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0.01));
+        border: var(--border);
+        border-radius: 10px;
+        padding: 15px;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        transition: 0.3s;
+    }
+    .rank-card:hover { transform: scale(1.02); border-color: var(--neon-cyan); }
+    .rank-1 { border: 1px solid var(--neon-gold); box-shadow: 0 0 15px rgba(255, 215, 0, 0.2); }
+    
+    /* 按钮 */
+    .stButton button {
+        background: transparent !important;
+        border: 1px solid var(--neon-cyan) !important;
+        color: var(--neon-cyan) !important;
+        font-family: 'Share Tech Mono', monospace;
+        text-transform: uppercase;
+    }
+    .stButton button:hover {
+        background: var(--neon-cyan) !important;
+        color: black !important;
+        box-shadow: 0 0 20px var(--neon-cyan);
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# === 2. 数据库 (保持不变) ===
+DB_FILE = "jarvis_cyber_v2.db"
 
 def init_db():
-    """初始化数据库：创建用户表、持仓表、历史表"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 用户表
-    c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT, balance REAL)''')
-    # 持仓表
-    c.execute('''CREATE TABLE IF NOT EXISTS positions 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, symbol TEXT, type TEXT, 
-                  entry REAL, size REAL, leverage INTEGER, margin REAL, tp REAL, sl REAL)''')
-    # 历史表
-    c.execute('''CREATE TABLE IF NOT EXISTS history 
-                 (time TEXT, username TEXT, symbol TEXT, action TEXT, 
-                  price TEXT, size TEXT, pnl TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, balance REAL, bot_active INTEGER)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS positions (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, symbol TEXT, type TEXT, entry REAL, size REAL, leverage INTEGER, margin REAL, tp REAL, sl REAL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history (time TEXT, username TEXT, symbol TEXT, action TEXT, price TEXT, size TEXT, pnl TEXT)''')
     conn.commit()
     conn.close()
 
-# 密码加密函数
-def make_hashes(password):
-    return hashlib.sha256(str.encode(password)).hexdigest()
+def make_hashes(p): return hashlib.sha256(str.encode(p)).hexdigest()
+def check_hashes(p,h): return make_hashes(p) == h
 
-def check_hashes(password, hashed_text):
-    if make_hashes(password) == hashed_text: return True
-    return False
+# === 3. 核心 API (缓存加速) ===
+@st.cache_data(ttl=3)
+def get_ticker_price(symbol):
+    try:
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+        return float(requests.get(url, timeout=1).json()['price'])
+    except: return 0.0
 
-def add_user(username, password):
+@st.cache_data(ttl=60)
+def get_klines(symbol, interval):
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}USDT&interval={interval}&limit=100"
+        data = requests.get(url, timeout=2).json()
+        df = pd.DataFrame(data, columns=['time','o','h','l','c','v','x','y','z','a','b','c'])
+        df['time'] = pd.to_datetime(df['time'], unit='ms')
+        for c in ['o','h','l','c']: df[c] = df[c].astype(float)
+        return df
+    except: return pd.DataFrame()
+
+# === 4. 排行榜核心逻辑 (新功能) ===
+def get_all_users_equity():
+    """计算所有用户的真实身价 (余额 + 未实现盈亏)"""
     conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE username =?', (username,))
-    if c.fetchone(): return False # 用户已存在
-    c.execute('INSERT INTO users VALUES (?,?,?)', (username, make_hashes(password), 10000.0)) # 初始送1万U
-    conn.commit()
+    users = pd.read_sql("SELECT username, balance FROM users", conn)
+    positions = pd.read_sql("SELECT * FROM positions", conn)
     conn.close()
-    return True
-
-def login_user(username, password):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE username =?', (username,))
-    data = c.fetchone()
-    conn.close()
-    if data and check_hashes(password, data[1]): return data
-    return None
-
-# === 3. 交易功能函数 (读写数据库) ===
-def get_user_balance(username):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('SELECT balance FROM users WHERE username=?', (username,))
-    res = c.fetchone()
-    conn.close()
-    return res[0] if res else 0.0
-
-def update_balance(username, amount):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('UPDATE users SET balance = balance + ? WHERE username=?', (amount, username))
-    conn.commit()
-    conn.close()
-
-def get_positions(username):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM positions WHERE username = ?", conn, params=(username,))
-    conn.close()
-    return df.to_dict('records')
-
-def place_order_db(username, symbol, side, margin, leverage):
-    current_bal = get_user_balance(username)
-    if current_bal < margin: return False, "余额不足"
     
-    price = get_ticker_data(symbol)['price']
-    size = (margin * leverage) / price
+    leaderboard = []
     
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    # 1. 扣钱
-    c.execute('UPDATE users SET balance = balance - ? WHERE username=?', (margin, username))
-    # 2. 加仓
-    c.execute('''INSERT INTO positions (username, symbol, type, entry, size, leverage, margin, tp, sl)
-                 VALUES (?,?,?,?,?,?,?,0,0)''', (username, symbol, side, price, size, leverage, margin))
-    # 3. 记日志
-    c.execute('''INSERT INTO history VALUES (?,?,?,?,?,?,?)''', 
-              (datetime.now().strftime("%H:%M:%S"), username, symbol, f"OPEN {side}", 
-               f"${price:.2f}", f"{size:.4f}", "-"))
-    conn.commit()
-    conn.close()
-    return True, "开仓成功"
-
-def close_position_db(pos_id, current_price):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT * FROM positions WHERE id=?", (pos_id,))
-    pos = c.fetchone() # (id, user, sym, type, entry, size, lev, mar, ...)
-    
-    if pos:
-        username, symbol, side, entry, size, margin = pos[1], pos[2], pos[3], pos[4], pos[5], pos[7]
+    for index, user in users.iterrows():
+        name = user['username']
+        balance = user['balance']
         
-        # 计算盈亏
-        if side == 'LONG': pnl = (current_price - entry) * size
-        else: pnl = (entry - current_price) * size
+        # 计算该用户的未实现盈亏
+        unrealized_pnl = 0
+        user_pos = positions[positions['username'] == name]
         
-        # 退钱 (本金+盈亏)
-        c.execute('UPDATE users SET balance = balance + ? WHERE username=?', (margin + pnl, username))
-        # 删仓位
-        c.execute('DELETE FROM positions WHERE id=?', (pos_id,))
-        # 记日志
-        c.execute('''INSERT INTO history VALUES (?,?,?,?,?,?,?)''', 
-              (datetime.now().strftime("%H:%M:%S"), username, symbol, "CLOSE", 
-               f"${current_price:.2f}", f"{size:.4f}", f"${pnl:+.2f}"))
+        for idx, p in user_pos.iterrows():
+            curr = get_ticker_price(p['symbol'])
+            if curr > 0:
+                if p['type'] == 'LONG': unrealized_pnl += (curr - p['entry']) * p['size']
+                else: unrealized_pnl += (p['entry'] - curr) * p['size']
+        
+        total_equity = balance + unrealized_pnl
+        leaderboard.append({"Username": name, "Equity": total_equity, "PNL": unrealized_pnl})
+    
+    # 按身价排序
+    df = pd.DataFrame(leaderboard).sort_values(by="Equity", ascending=False).reset_index(drop=True)
+    return df
+
+def get_rank_badge(equity):
+    if equity > 100000: return "👑 王者"
+    if equity > 50000: return "💎 钻石"
+    if equity > 20000: return "🥇 黄金"
+    if equity > 10000: return "🥈 白银"
+    return "🥉 青铜"
+
+# === 5. 交易功能 ===
+def place_order(user, sym, side, margin, lev, tp, sl):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT balance FROM users WHERE username=?', (user,))
+    bal = c.fetchone()[0]
+    
+    if bal < margin: return False, "INSUFFICIENT FUNDS"
+    price = get_ticker_price(sym)
+    if price == 0: return False, "MARKET OFFLINE"
+    
+    size = (margin * lev) / price
+    c.execute('UPDATE users SET balance = balance - ? WHERE username=?', (margin, user))
+    c.execute('INSERT INTO positions (username, symbol, type, entry, size, leverage, margin, tp, sl) VALUES (?,?,?,?,?,?,?,?,?)', 
+              (user, sym, side, price, size, lev, margin, tp, sl))
+    conn.commit()
+    conn.close()
+    return True, "ORDER EXECUTED"
+
+def close_order(id, price):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('SELECT * FROM positions WHERE id=?', (id,))
+    p = c.fetchone()
+    if p:
+        # id0, user1, sym2, type3, entry4, size5, lev6, mar7
+        if p[3] == 'LONG': pnl = (price - p[4]) * p[5]
+        else: pnl = (p[4] - price) * p[5]
+        c.execute('UPDATE users SET balance = balance + ? WHERE username=?', (p[7] + pnl, p[1]))
+        c.execute('DELETE FROM positions WHERE id=?', (id,))
+        c.execute('INSERT INTO history VALUES (?,?,?,?,?,?,?)', 
+                  (datetime.now().strftime("%H:%M"), p[1], p[2], "CLOSE", str(price), str(p[5]), str(pnl)))
         conn.commit()
     conn.close()
 
-def get_history(username):
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT * FROM history WHERE username = ? ORDER BY rowid DESC LIMIT 50", conn, params=(username,))
-    conn.close()
-    return df
+# === 6. UI 页面 ===
 
-# === 4. API 与 机器人逻辑 (简化版) ===
-def get_ticker_data(symbol):
-    try:
-        # 为了速度，这里用个随机模拟，真实部署时解开下面的 requests
-        # url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}USDT"
-        # data = requests.get(url, timeout=1).json()
-        # return {'price': float(data['lastPrice']), 'change': float(data['priceChangePercent'])}
-        base = 80000 if 'BTC' in symbol else 3000
-        mock_price = base + random.randint(-50, 50)
-        return {'price': mock_price, 'change': random.uniform(-5, 5)}
-    except: return {'price': 0, 'change': 0}
-
-def get_klines(symbol):
-    # 模拟 K 线数据，避免多人请求被币安封 IP
-    dates = pd.date_range(end=datetime.now(), periods=50, freq='1H')
-    df = pd.DataFrame(index=dates)
-    df['close'] = [get_ticker_data(symbol)['price'] for _ in range(50)]
-    df['open'] = df['close'] + 50
-    df['high'] = df['close'] + 100
-    df['low'] = df['close'] - 100
-    df['time'] = df.index
-    return df
-
-# === 5. 登录/注册页面 ===
 def login_page():
-    st.markdown("## 🔐 Jarvis Online 登录")
+    st.markdown("<br><br><h1 class='main-title' style='text-align: center;'>JARVIS OS 4.0</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #00f3ff; letter-spacing: 3px;'>MULTI-USER NEURAL INTERFACE</p>", unsafe_allow_html=True)
     
-    tab1, tab2 = st.tabs(["登录", "注册新账号"])
-    
-    with tab1:
-        user = st.text_input("用户名", key="l_user")
-        pwd = st.text_input("密码", type='password', key="l_pwd")
-        if st.button("登录"):
-            account = login_user(user, pwd)
-            if account:
-                st.session_state['logged_in'] = True
-                st.session_state['username'] = user
-                st.success(f"欢迎回来, {user}!")
-                st.rerun()
-            else:
-                st.error("用户名或密码错误")
+    c1,c2,c3 = st.columns([1,2,1])
+    with c2:
+        tab1, tab2 = st.tabs(["LOGIN", "REGISTER"])
+        with tab1:
+            u = st.text_input("USERNAME", key="l_u")
+            p = st.text_input("PASSWORD", type='password', key="l_p")
+            if st.button("CONNECT", use_container_width=True):
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                c.execute('SELECT * FROM users WHERE username=?', (u,))
+                data = c.fetchone()
+                conn.close()
+                if data and check_hashes(p, data[1]):
+                    st.session_state['user'] = u
+                    st.rerun()
+                else: st.error("ACCESS DENIED")
+        with tab2:
+            nu = st.text_input("NEW USERNAME", key="r_u")
+            np = st.text_input("NEW PASSWORD", type='password', key="r_p")
+            if st.button("CREATE ID", use_container_width=True):
+                conn = sqlite3.connect(DB_FILE)
+                c = conn.cursor()
+                try:
+                    c.execute('INSERT INTO users VALUES (?,?,?,?)', (nu, make_hashes(np), 10000.0, 0))
+                    conn.commit()
+                    st.success("ID CREATED")
+                except: st.error("USER EXISTS")
+                finally: conn.close()
 
-    with tab2:
-        new_user = st.text_input("设置用户名", key="r_user")
-        new_pwd = st.text_input("设置密码", type='password', key="r_pwd")
-        if st.button("立即注册"):
-            if add_user(new_user, new_pwd):
-                st.success("注册成功！请去登录页面登录。")
-            else:
-                st.error("该用户名已被占用")
-
-# === 6. 交易主界面 ===
-def main_app():
-    user = st.session_state['username']
-    balance = get_user_balance(user)
+def app_interface():
+    user = st.session_state['user']
     
-    # 侧边栏
+    # --- 侧边导航栏 ---
     with st.sidebar:
-        st.title(f"👤 {user}")
-        st.metric("钱包余额", f"${balance:,.2f}")
-        if st.button("退出登录"):
-            st.session_state['logged_in'] = False
-            st.rerun()
+        st.markdown(f"## 👤 COMMANDER: {user}")
+        
+        # 导航菜单
+        page = st.radio("NAVIGATION", ["📈 TRADING TERMINAL", "🏆 LEADERBOARD", "📜 AUDIT LOGS"], label_visibility="collapsed")
         
         st.divider()
-        st.subheader("我的持仓")
-        positions = get_positions(user)
-        if positions:
-            for p in positions:
-                curr = get_ticker_data(p['symbol'])['price']
-                if p['type'] == 'LONG': pnl = (curr - p['entry']) * p['size']
-                else: pnl = (p['entry'] - curr) * p['size']
-                
-                color = "green" if pnl>=0 else "red"
-                with st.expander(f"{p['symbol']} {p['type']} ${pnl:.1f}"):
-                    st.write(f"Entry: {p['entry']}")
-                    st.markdown(f"**PNL: :{color}[${pnl:.2f}]**")
-                    if st.button("平仓", key=f"c_{p['id']}"):
-                        close_position_db(p['id'], curr)
-                        st.rerun()
-        else:
-            st.info("空仓")
-
-    # 主区
-    st.markdown("### 🌐 全球市场 (多人联机版)")
-    
-    # 简单的行情
-    cols = st.columns(4)
-    coins = ["BTC", "ETH", "SOL", "BNB"]
-    for i, c in enumerate(coins):
-        d = get_ticker_data(c)
-        cols[i].metric(c, f"${d['price']}", f"{d['change']:.2f}%")
+        st.markdown("### SYSTEM STATUS")
+        st.caption("🟢 SERVER: ONLINE")
+        st.caption("🟢 LATENCY: 24ms")
         
-    st.divider()
-    
-    # 交易操作
-    sel_coin = st.selectbox("选择币种", coins)
-    
-    # 画图
-    df = get_klines(sel_coin)
-    fig = go.Figure(data=[go.Candlestick(x=df['time'], open=df['open'], high=df['high'], low=df['low'], close=df['close'])])
-    fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0))
-    st.plotly_chart(fig, use_container_width=True)
-    
-    c1, c2, c3 = st.columns([1,1,2])
-    lev = c1.slider("杠杆", 1, 100, 20)
-    margin = c2.number_input("保证金", 100)
-    
-    with c3:
-        st.write("")
-        st.write("")
-        b1, b2 = st.columns(2)
-        if b1.button("🟢 做多", use_container_width=True):
-            ok, msg = place_order_db(user, sel_coin, "LONG", margin, lev)
-            if ok: st.success(msg); st.rerun()
-            else: st.error(msg)
-        if b2.button("🔴 做空", use_container_width=True):
-            ok, msg = place_order_db(user, sel_coin, "SHORT", margin, lev)
-            if ok: st.success(msg); st.rerun()
-            else: st.error(msg)
+        if st.button("LOGOUT", use_container_width=True):
+            del st.session_state['user']
+            st.rerun()
 
-    # 历史
-    st.subheader("📜 交易记录")
-    hist = get_history(user)
-    if not hist.empty:
-        st.dataframe(hist, use_container_width=True, hide_index=True)
-
-    if st.checkbox("刷新数据", value=True):
-        time.sleep(3)
-        st.rerun()
-
-# === 程序入口 ===
-if __name__ == '__main__':
-    init_db() # 确保数据库存在
-    
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-        
-    if not st.session_state['logged_in']:
-        login_page()
-    else:
-        main_app()
+    # --- 页面 1: 交易终端 ---
+    if "TRADING" in page:
+        st.markdown(f"<h1 class='main-
