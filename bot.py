@@ -8,29 +8,54 @@ import hashlib
 import requests
 import streamlit.components.v1 as components
 
-# === 1. 页面配置 ===
-st.set_page_config(page_title="Jarvis OS X", page_icon="☢️", layout="wide")
+# === 1. 页面配置与 Logo ===
+st.set_page_config(page_title="Henry AI Bot", page_icon="🤖", layout="wide")
 
-st.markdown("""
+# 赛博朋克 LOGO (SVG)
+HENRY_LOGO = """
+<svg width="100%" height="120" viewBox="0 0 400 120" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="neon-grad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#00f3ff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#bd00ff;stop-opacity:1" />
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2.5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="10" y="10" width="380" height="100" rx="15" fill="none" stroke="url(#neon-grad)" stroke-width="3" filter="url(#glow)"/>
+  <path d="M50 60 L80 30 M50 60 L80 90 M350 60 L320 30 M350 60 L320 90" stroke="#39ff14" stroke-width="2" filter="url(#glow)"/>
+  <circle cx="200" cy="60" r="30" fill="none" stroke="url(#neon-grad)" stroke-width="2"/>
+  <text x="200" y="65" font-family="'Share Tech Mono', monospace" font-size="35" fill="url(#neon-grad)" text-anchor="middle" font-weight="bold" filter="url(#glow)">HENRY AI BOT</text>
+  <text x="200" y="95" font-family="sans-serif" font-size="12" fill="#00f3ff" text-anchor="middle" letter-spacing="2">QUANTUM TRADING SYSTEM</text>
+</svg>
+"""
+
+st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;700&family=Share+Tech+Mono&display=swap');
-    :root { --neon-cyan: #00f3ff; --neon-green: #39ff14; --neon-red: #ff073a; --dark-bg: #0a0a12; }
-    .stApp { background-color: var(--dark-bg); color: #fff; font-family: 'Rajdhani', sans-serif; }
-    section[data-testid="stSidebar"] { background-color: #050505; border-right: 1px solid #333; }
+    :root {{ --neon-cyan: #00f3ff; --neon-green: #39ff14; --neon-red: #ff073a; --dark-bg: #0a0a12; }}
+    .stApp {{ background-color: var(--dark-bg); color: #fff; font-family: 'Rajdhani', sans-serif; }}
+    section[data-testid="stSidebar"] {{ background-color: #050505; border-right: 1px solid #333; }}
     
-    .stat-box { border: 1px solid #333; padding: 10px; border-radius: 5px; background: rgba(255,255,255,0.05); text-align: center; }
-    .stat-value { font-size: 16px; font-weight: bold; color: var(--neon-cyan); font-family: 'Share Tech Mono'; }
-    
-    .stButton button { background: rgba(0, 243, 255, 0.1) !important; border: 1px solid var(--neon-cyan) !important; color: var(--neon-cyan) !important; font-weight: bold; }
-    .stButton button:hover { background: var(--neon-cyan) !important; color: #000 !important; }
-    
-    .pos-card { background: rgba(20, 20, 30, 0.9); border: 1px solid #444; border-left: 4px solid #888; padding: 15px; margin-bottom: 10px; border-radius: 4px; }
-    .pos-long { border-left-color: var(--neon-green); }
-    .pos-short { border-left-color: var(--neon-red); }
+    .stButton button {{ background: rgba(0, 243, 255, 0.1) !important; border: 1px solid var(--neon-cyan) !important; color: var(--neon-cyan) !important; font-weight: bold; }}
+    .stButton button:hover {{ background: var(--neon-cyan) !important; color: #000 !important; }}
+    /* 红色按钮特化 */
+    .stButton button[kind="primary"] {{ background: rgba(255, 7, 58, 0.2) !important; border: 1px solid var(--neon-red) !important; color: var(--neon-red) !important; }}
+    .stButton button[kind="primary"]:hover {{ background: var(--neon-red) !important; color: #fff !important; }}
+
+    .pos-card {{ background: rgba(20, 20, 30, 0.9); border: 1px solid #444; border-left: 4px solid #888; padding: 15px; margin-bottom: 10px; border-radius: 4px; }}
+    .pos-long {{ border-left-color: var(--neon-green); }}
+    .pos-short {{ border-left-color: var(--neon-red); }}
 </style>
+<div style='text-align:center; margin-bottom: 20px;'>{HENRY_LOGO}</div>
 """, unsafe_allow_html=True)
 
-# === 2. 数据库核心 (关键修复：更换新文件名) ===
+# === 2. 数据库核心 (保留数据) ===
 DB_FILE = "jarvis_production_v10.db" 
 
 def get_conn():
@@ -40,8 +65,6 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
     c.execute('PRAGMA journal_mode=WAL;')
-    
-    # 强制创建完整表结构
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (username TEXT PRIMARY KEY, password TEXT, balance REAL, active_strategy TEXT, avatar TEXT, bot_enabled INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS positions 
@@ -88,26 +111,16 @@ def update_user_setting(username, col, val):
     conn.commit()
     conn.close()
 
-# === 4. 交易引擎 (带错误反馈) ===
+# === 4. 交易引擎 (修复历史价格 bug) ===
 def get_price(symbol):
-    # 多源价格获取，确保不断网
-    urls = [
-        f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT",
-        f"https://api.huobi.pro/market/detail/merged?symbol={symbol.lower()}usdt",
-    ]
-    for url in urls:
-        try:
-            res = requests.get(url, timeout=1).json()
-            if 'price' in res: return float(res['price'])
-            if 'tick' in res: return float(res['tick']['close'])
-        except: continue
-    
-    # 仿真保底
-    bases = {"BTC":96000, "ETH":3600, "SOL":230, "BNB":650, "DOGE":0.4, "PEPE":0.00002}
-    return bases.get(symbol, 100) * random.uniform(0.99, 1.01)
+    # 优先使用仿真基准价，结合随机波动，确保价格稳定且永远存在
+    bases = {"BTC":95000.0, "ETH":3650.0, "SOL":235.0, "BNB":655.0, "DOGE":0.41, "PEPE":0.000021}
+    base = bases.get(symbol, 100.0)
+    # 加上时间因子产生平滑波动
+    noise = 1.0 + (time.time() % 100 / 1000.0 - 0.05)
+    return base * noise
 
 def place_order(user, sym, side, margin, lev, tp, sl):
-    # 1. 余额检查
     bal, _, _, _ = get_user_info(user)
     if bal < margin: return False, "Insufficient Balance"
     
@@ -116,7 +129,6 @@ def place_order(user, sym, side, margin, lev, tp, sl):
     
     conn = get_conn()
     try:
-        # 2. 事务写入
         conn.execute('UPDATE users SET balance = balance - ? WHERE username=?', (margin, user))
         conn.execute('''INSERT INTO positions (username, symbol, type, entry, size, leverage, margin, tp, sl) 
                         VALUES (?,?,?,?,?,?,?,?,?)''', (user, sym, side, price, size, lev, margin, tp, sl))
@@ -125,17 +137,20 @@ def place_order(user, sym, side, margin, lev, tp, sl):
         conn.commit()
         return True, f"Opened @ ${price:.2f}"
     except Exception as e:
-        return False, str(e) # 返回具体错误信息
+        return False, str(e)
     finally: conn.close()
 
-def close_order(id, reason="Manual"):
+# 关键修复：增加 forced_price 参数用于准确记录触发价
+def close_order(id, reason="Manual", forced_price=None):
     conn = get_conn()
     try:
         c = conn.cursor()
         c.execute("SELECT * FROM positions WHERE id=?", (id,))
         p = c.fetchone()
         if p:
-            curr = get_price(p[2])
+            # 如果有强制触发价（TP/SL），就用它；否则获取现价
+            curr = forced_price if forced_price is not None else get_price(p[2])
+            
             if p[3] == 'LONG': pnl = (curr - p[4]) * p[5]
             else: pnl = (p[4] - curr) * p[5]
             
@@ -146,30 +161,36 @@ def close_order(id, reason="Manual"):
             conn.commit()
     finally: conn.close()
 
-# === 5. 机器人引擎 (修复：只有成功才弹窗) ===
+# === 5. 机器人引擎 (优化卡顿) ===
 def bot_engine(user):
     _, strategy, _, enabled = get_user_info(user)
     if not enabled or strategy == "None": return
 
-    # 提高触发概率到 20%
-    if random.random() < 0.2:
+    # 优化：检查持仓数，超过5个就不开了，防止卡顿
+    conn = get_conn()
+    pos_count = conn.execute("SELECT COUNT(*) FROM positions WHERE username=?", (user,)).fetchone()[0]
+    conn.close()
+    if pos_count >= 5: return
+
+    # 降低触发频率到 10%
+    if random.random() < 0.1:
         coins = ["BTC", "ETH", "SOL", "DOGE", "PEPE"]
         target = random.choice(coins)
         price = get_price(target)
         
         if strategy == "Sniper":
             side = random.choice(["LONG", "SHORT"])
-            tp = price * 1.01 if side == 'LONG' else price * 0.99
-            sl = price * 0.995 if side == 'LONG' else price * 1.005
-            # 关键修改：获取返回值
-            success, msg = place_order(user, target, side, 100, 50, tp, sl)
+            tp = price * 1.015 if side == 'LONG' else price * 0.985
+            sl = price * 0.99 if side == 'LONG' else price * 1.01
+            success, _ = place_order(user, target, side, 100, 50, tp, sl)
             if success: st.toast(f"🔫 Sniper: {target} {side}", icon="💥")
             
         elif strategy == "Grid":
             side = random.choice(["LONG", "SHORT"])
-            success, msg = place_order(user, target, side, 50, 20, 0, 0)
+            success, _ = place_order(user, target, side, 50, 20, 0, 0)
             if success: st.toast(f"🕸 Grid: {target} {side}", icon="🕷️")
 
+# 关键修复：传递触发价格给 close_order
 def check_monitor(user):
     conn = get_conn()
     positions = pd.read_sql("SELECT * FROM positions WHERE username=?", conn, params=(user,))
@@ -178,21 +199,35 @@ def check_monitor(user):
     for _, p in positions.iterrows():
         curr = get_price(p['symbol'])
         reason = None
+        trigger_price = None # 记录触发时的价格
         
+        # 止盈
         if p['tp'] > 0:
-            if (p['type']=='LONG' and curr>=p['tp']) or (p['type']=='SHORT' and curr<=p['tp']): reason = "TP Hit"
-        if p['sl'] > 0:
-            if (p['type']=='LONG' and curr<=p['sl']) or (p['type']=='SHORT' and curr>=p['sl']): reason = "SL Hit"
+            if (p['type']=='LONG' and curr>=p['tp']):
+                reason, trigger_price = "TP Hit", p['tp']
+            elif (p['type']=='SHORT' and curr<=p['tp']):
+                reason, trigger_price = "TP Hit", p['tp']
+        
+        # 止损 (如果没触发止盈)
+        if not reason and p['sl'] > 0:
+            if (p['type']=='LONG' and curr<=p['sl']):
+                reason, trigger_price = "SL Hit", p['sl']
+            elif (p['type']=='SHORT' and curr>=p['sl']):
+                reason, trigger_price = "SL Hit", p['sl']
             
-        liq_rate = 1 / p['leverage']
-        liq = p['entry'] * (1 - liq_rate + 0.005) if p['type']=='LONG' else p['entry'] * (1 + liq_rate - 0.005)
-        if (p['type']=='LONG' and curr<=liq) or (p['type']=='SHORT' and curr>=liq): reason = "LIQUIDATED"
+        # 强平
+        if not reason:
+            liq_rate = 1 / p['leverage']
+            liq = p['entry'] * (1 - liq_rate + 0.005) if p['type']=='LONG' else p['entry'] * (1 + liq_rate - 0.005)
+            if (p['type']=='LONG' and curr<=liq) or (p['type']=='SHORT' and curr>=liq):
+                 reason, trigger_price = "LIQUIDATED", liq
             
-        if reason: close_order(p['id'], reason)
+        if reason:
+            # 将准确的触发价格传给平仓函数
+            close_order(p['id'], reason, forced_price=trigger_price)
 
 # === 6. UI 界面 ===
 def login_page():
-    st.markdown("<br><br><h1 style='text-align:center'>JARVIS OS 10.0</h1>", unsafe_allow_html=True)
     t1, t2 = st.tabs(["LOGIN", "REGISTER"])
     with t1:
         u = st.text_input("User", key="l1")
@@ -203,7 +238,7 @@ def login_page():
     with t2:
         nu = st.text_input("New User", key="r1")
         np = st.text_input("New Pass", type="password", key="r2")
-        av = st.selectbox("Avatar", ["👨‍🚀","🤖","👽","🦊","💀"])
+        av = st.selectbox("Avatar", ["👨‍🚀","🤖","👽","🦊","💀","🐲"])
         if st.button("Register", use_container_width=True):
             if register_user(nu, np, av): st.success("OK"); st.rerun()
             else: st.error("Taken")
@@ -213,12 +248,12 @@ def main_app():
     bal, strat, ava, bot_on = get_user_info(user)
     
     with st.sidebar:
-        st.markdown(f"<h1 style='text-align:center'>{ava}</h1><h3 style='text-align:center'>{user}</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h1 style='text-align:center; margin-bottom:0'>{ava}</h1><h3 style='text-align:center; margin-top:0'>{user}</h3>", unsafe_allow_html=True)
         st.metric("WALLET", f"${bal:,.2f}")
         page = st.radio("MENU", ["TERMINAL", "LEADERBOARD"], label_visibility="collapsed")
         
         st.divider()
-        st.markdown("### 🤖 BOT CONTROL")
+        st.markdown("### 🤖 AI CONTROL")
         new_strat = st.selectbox("STRATEGY", ["None", "Sniper", "Grid"], index=["None","Sniper","Grid"].index(strat))
         if new_strat != strat:
             update_user_setting(user, "active_strategy", new_strat)
@@ -231,7 +266,7 @@ def main_app():
             
         if toggle: 
             st.success(f"ACTIVE: {new_strat}")
-            bot_engine(user) # 尝试执行一次
+            bot_engine(user)
         
         st.divider()
         if st.button("LOGOUT"): del st.session_state['user']; st.rerun()
@@ -259,17 +294,7 @@ def main_app():
                 else: st.error(msg)
 
         with c_chart:
-            components.html(f"""
-            <div class="tradingview-widget-container">
-              <div id="tv_chart"></div>
-              <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-              <script type="text/javascript">
-              new TradingView.widget(
-              {{ "width": "100%", "height": 500, "symbol": "BINANCE:{sym}USDT", "interval": "15", "timezone": "Asia/Shanghai", "theme": "dark", "style": "1", "locale": "en", "enable_publishing": false, "hide_top_toolbar": false, "container_id": "tv_chart" }}
-              );
-              </script>
-            </div>
-            """, height=500)
+            components.html(f"""<div class="tradingview-widget-container"><div id="tv_chart"></div><script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script><script type="text/javascript">new TradingView.widget({{ "width": "100%", "height": 500, "symbol": "BINANCE:{sym}USDT", "interval": "15", "timezone": "Asia/Shanghai", "theme": "dark", "style": "1", "locale": "en", "enable_publishing": false, "hide_top_toolbar": false, "container_id": "tv_chart" }});</script></div>""", height=500)
 
         st.markdown("### 📊 LIVE POSITIONS")
         conn = get_conn()
@@ -277,6 +302,15 @@ def main_app():
         conn.close()
         
         if not pos.empty:
+            # 新增：一键全平按钮
+            if st.button("🔥 CLOSE ALL POSITIONS 🔥", use_container_width=True, type="primary"):
+                conn = get_conn()
+                user_pos = pd.read_sql("SELECT id FROM positions WHERE username=?", conn, params=(user,))
+                conn.close()
+                for _, p_row in user_pos.iterrows():
+                    close_order(p_row['id'], "Close All")
+                st.rerun()
+
             for _, p in pos.iterrows():
                 curr = get_price(p['symbol'])
                 if p['type'] == 'LONG': 
@@ -303,15 +337,12 @@ def main_app():
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                if st.button(f"CLOSE {p['symbol']} #{p['id']}"):
-                    close_order(p['id'])
-                    st.rerun()
+                if st.button(f"CLOSE {p['symbol']} #{p['id']}"): close_order(p['id']); st.rerun()
         else: st.info("NO OPEN POSITIONS")
 
         st.markdown("### 📜 HISTORY")
         conn = get_conn()
-        hist = pd.read_sql("SELECT time, symbol, action, price, size, pnl FROM history WHERE username=? ORDER BY rowid DESC LIMIT 10", conn, params=(user,))
+        hist = pd.read_sql("SELECT time, symbol, action, price, size, pnl FROM history WHERE username=? ORDER BY rowid DESC LIMIT 15", conn, params=(user,))
         conn.close()
         st.dataframe(hist, use_container_width=True, hide_index=True)
 
@@ -322,7 +353,6 @@ def main_app():
         users = pd.read_sql("SELECT * FROM users", conn)
         pos = pd.read_sql("SELECT * FROM positions", conn)
         conn.close()
-        
         data = []
         for _, u in users.iterrows():
             unrealized = 0
@@ -332,13 +362,12 @@ def main_app():
                 if p['type'] == 'LONG': unrealized += (curr - p['entry']) * p['size']
                 else: unrealized += (p['entry'] - curr) * p['size']
             data.append({"User": u['username'], "Av": u['avatar'], "Eq": u['balance']+unrealized})
-            
         df = pd.DataFrame(data).sort_values(by="Eq", ascending=False).reset_index()
         for i, r in df.iterrows():
             st.markdown(f"""<div style='padding:10px; margin-bottom:5px; border:1px solid #333; border-radius:5px;'>#{i+1} {r['Av']} <b>{r['User']}</b> - <span style='color:#00f3ff'>${r['Eq']:,.0f}</span></div>""", unsafe_allow_html=True)
 
     check_monitor(user)
-    time.sleep(2)
+    time.sleep(3)
     st.rerun()
 
 if __name__ == '__main__':
