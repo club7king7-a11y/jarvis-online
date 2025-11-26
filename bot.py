@@ -345,3 +345,4 @@ if __name__ == '__main__':
     init_db()
     if 'user' not in st.session_state: login_page()
     else: main_app()
+
